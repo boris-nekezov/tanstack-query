@@ -1,0 +1,88 @@
+name: Move task to Done on merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  move-to-done:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      repository-projects: write
+
+    steps:
+      - name: Extract issue number from branch name
+        id: extract
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "Branch: $BRANCH"
+          ISSUE_NUM=$(echo "$BRANCH" | grep -oP 'BN-\K\d+')
+          echo "issue_number=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "Extracted issue number: $ISSUE_NUM"
+
+      - name: Close the issue
+        if: steps.extract.outputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          gh issue close ${{ steps.extract.outputs.issue_number }} \
+            -R ${{ github.repository }}
+
+      - name: Move project item to Done
+        if: steps.extract.outputs.issue_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          ISSUE_NODE_ID=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issue(number: $number) {
+                  id
+                }
+              }
+            }' \
+            -f owner="${{ github.repository_owner }}" \
+            -f repo="${{ github.event.repository.name }}" \
+            -F number=${{ steps.extract.outputs.issue_number }} \
+            --jq '.data.repository.issue.id')
+
+          echo "Issue Node ID: $ISSUE_NODE_ID"
+
+          # Find the item in the project
+          ITEM_ID=$(gh api graphql -f query='
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+                item {
+                  id
+                }
+              }
+            }' \
+            -f projectId="PVT_kwHOAFbYBc4BR_f6" \
+            -f contentId="$ISSUE_NODE_ID" \
+            --jq '.data.addProjectV2ItemById.item.id')
+
+          echo "Item ID: $ITEM_ID"
+
+          # Update status to Done
+          gh api graphql -f query='
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item {
+                  id
+                }
+              }
+            }' \
+            -f projectId="PVT_kwHOAFbYBc4BR_f6" \
+            -f itemId="$ITEM_ID" \
+            -f fieldId="PVTSSF_lAHOAFbYBc4BR_f6zg_qAL0" \
+            -f optionId="98236657"
+
+          echo "Moved to Done!"
